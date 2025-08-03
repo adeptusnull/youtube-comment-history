@@ -127,9 +127,9 @@
   color: var(--yt-spec-text-secondary);
 }
 
-.comment-history-tab-custom {
+/* .comment-history-tab-custom {
   /* Custom class to identify our tab */
-}
+/* } */
 
 .load-more-container {
   display: flex;

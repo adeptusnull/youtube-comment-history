@@ -12,5 +12,8 @@ const CONFIG = {
   MAX_COMMENTS_TO_SHOW: 50,
   
   // Maximum comments to fetch per video
-  MAX_COMMENTS_PER_VIDEO: 50
+  MAX_COMMENTS_PER_VIDEO: 50,
+  
+  // Debug mode - shows all comments, not just from channel owner
+  DEBUG_MODE: false
 };

@@ -4,3 +4,4 @@ config.js
 # Ignore any backup config files
 config.js.backup
 config.js.example
+.DS_Store

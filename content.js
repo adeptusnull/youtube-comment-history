@@ -10,24 +10,65 @@ let isLoading = false;
 
 // Function to extract channel ID from various YouTube pages
 function getChannelId() {
-  // Try different methods to get channel ID
+  console.log('[Comment History] Attempting to extract channel ID...');
+  
+  // Method 1: Try from canonical link
   const channelLink = document.querySelector('link[rel="canonical"]');
   if (channelLink && channelLink.href.includes('/channel/')) {
-    return channelLink.href.split('/channel/')[1].split('/')[0];
+    const channelId = channelLink.href.split('/channel/')[1].split('/')[0];
+    console.log('[Comment History] Found channel ID from canonical:', channelId);
+    return channelId;
   }
   
-  // Try from meta tags
+  // Method 2: Try from meta tags
   const metaTag = document.querySelector('meta[itemprop="channelId"]');
   if (metaTag) {
+    console.log('[Comment History] Found channel ID from meta tag:', metaTag.content);
     return metaTag.content;
   }
   
-  // Try from URL
+  // Method 3: Try from URL
   const urlMatch = window.location.href.match(/\/channel\/([^\/\?]+)/);
   if (urlMatch) {
+    console.log('[Comment History] Found channel ID from URL:', urlMatch[1]);
     return urlMatch[1];
   }
   
+  // Method 4: Try from page data (YouTube sometimes stores data in scripts)
+  try {
+    const scripts = document.querySelectorAll('script');
+    for (const script of scripts) {
+      const text = script.textContent;
+      if (text && text.includes('browseId')) {
+        const match = text.match(/"browseId":"(UC[^"]+)"/);
+        if (match) {
+          console.log('[Comment History] Found channel ID from script:', match[1]);
+          return match[1];
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[Comment History] Error searching scripts:', e);
+  }
+  
+  // Method 5: For @username URLs, try to get from page structure
+  if (window.location.href.includes('/@')) {
+    const ytInitialData = window.ytInitialData;
+    if (ytInitialData?.header?.c4TabbedHeaderRenderer?.channelId) {
+      const channelId = ytInitialData.header.c4TabbedHeaderRenderer.channelId;
+      console.log('[Comment History] Found channel ID from ytInitialData:', channelId);
+      return channelId;
+    }
+    
+    // Try alternate structure
+    if (ytInitialData?.metadata?.channelMetadataRenderer?.externalId) {
+      const channelId = ytInitialData.metadata.channelMetadataRenderer.externalId;
+      console.log('[Comment History] Found channel ID from metadata:', channelId);
+      return channelId;
+    }
+  }
+  
+  console.error('[Comment History] Could not find channel ID!');
   return null;
 }
 
@@ -35,6 +76,7 @@ function getChannelId() {
 async function fetchChannelVideos(channelId, pageToken = '') {
   try {
     if (typeof CONFIG === 'undefined' || !CONFIG.API_KEY) {
+      console.error('[Comment History] CONFIG or API_KEY not found');
       return { success: false, message: "API key not found. Please check your config.js file." };
     }
     
@@ -43,12 +85,27 @@ async function fetchChannelVideos(channelId, pageToken = '') {
       url += `&pageToken=${pageToken}`;
     }
     
+    console.log('[Comment History] Fetching videos from:', url);
+    
     const response = await fetch(url);
     const data = await response.json();
     
-    if (!data.items) {
+    console.log('[Comment History] Videos API response:', data);
+    
+    if (data.error) {
+      console.error('[Comment History] API Error:', data.error);
+      return { 
+        success: false, 
+        message: `API Error: ${data.error.message || 'Unknown error'}` 
+      };
+    }
+    
+    if (!data.items || data.items.length === 0) {
+      console.log('[Comment History] No videos found for channel:', channelId);
       return { success: false, message: "No videos found for this channel" };
     }
+    
+    console.log(`[Comment History] Found ${data.items.length} videos`);
     
     return { 
       success: true, 
@@ -56,7 +113,7 @@ async function fetchChannelVideos(channelId, pageToken = '') {
       nextPageToken: data.nextPageToken
     };
   } catch (error) {
-    console.error('Error fetching videos:', error);
+    console.error('[Comment History] Error fetching videos:', error);
     return { success: false, error: error.message };
   }
 }
@@ -64,34 +121,58 @@ async function fetchChannelVideos(channelId, pageToken = '') {
 // Function to fetch comments for specific videos
 async function fetchCommentsFromVideos(channelId, videos) {
   const comments = [];
+  console.log(`[Comment History] Fetching comments from ${videos.length} videos for channel ${channelId}`);
+  console.log(`[Comment History] Debug mode: ${CONFIG.DEBUG_MODE ? 'ON' : 'OFF'}`);
   
   for (const video of videos) {
     const videoId = video.id.videoId;
     const commentsUrl = `https://www.googleapis.com/youtube/v3/commentThreads?part=snippet,replies&videoId=${videoId}&maxResults=${CONFIG.MAX_COMMENTS_PER_VIDEO}&key=${CONFIG.API_KEY}`;
     
     try {
+      console.log(`[Comment History] Fetching comments for video: ${video.snippet.title}`);
       const commentsResponse = await fetch(commentsUrl);
       const commentsData = await commentsResponse.json();
       
+      if (commentsData.error) {
+        console.error(`[Comment History] Error fetching comments for video ${videoId}:`, commentsData.error);
+        continue;
+      }
+      
       if (commentsData.items) {
-        // Look for comments by the channel owner
+        let videoComments = 0;
+        let debugComments = 0;
+        
+        // Look for comments by the channel owner (or all comments in debug mode)
         for (const thread of commentsData.items) {
           const topComment = thread.snippet.topLevelComment;
-          if (topComment.snippet.authorChannelId?.value === channelId) {
+          const isChannelOwner = topComment.snippet.authorChannelId?.value === channelId;
+          
+          if (isChannelOwner || (CONFIG.DEBUG_MODE && debugComments < 5)) {
+            if (!isChannelOwner) debugComments++;
+            else videoComments++;
+            
             comments.push({
               text: topComment.snippet.textDisplay,
               date: new Date(topComment.snippet.publishedAt).toLocaleDateString(),
               timestamp: new Date(topComment.snippet.publishedAt).getTime(),
               likes: topComment.snippet.likeCount,
               videoUrl: `https://youtube.com/watch?v=${videoId}`,
-              videoTitle: video.snippet.title
+              videoTitle: video.snippet.title,
+              author: topComment.snippet.authorDisplayName,
+              authorChannelId: topComment.snippet.authorChannelId?.value,
+              isChannelOwner: isChannelOwner
             });
           }
           
           // Check replies too
           if (thread.replies?.comments) {
             for (const reply of thread.replies.comments) {
-              if (reply.snippet.authorChannelId?.value === channelId) {
+              const isReplyChannelOwner = reply.snippet.authorChannelId?.value === channelId;
+              
+              if (isReplyChannelOwner || (CONFIG.DEBUG_MODE && debugComments < 5)) {
+                if (!isReplyChannelOwner) debugComments++;
+                else videoComments++;
+                
                 comments.push({
                   text: reply.snippet.textDisplay,
                   date: new Date(reply.snippet.publishedAt).toLocaleDateString(),
@@ -99,18 +180,27 @@ async function fetchCommentsFromVideos(channelId, videos) {
                   likes: reply.snippet.likeCount,
                   videoUrl: `https://youtube.com/watch?v=${videoId}`,
                   videoTitle: video.snippet.title,
-                  isReply: true
+                  author: reply.snippet.authorDisplayName,
+                  authorChannelId: reply.snippet.authorChannelId?.value,
+                  isReply: true,
+                  isChannelOwner: isReplyChannelOwner
                 });
               }
             }
           }
         }
+        
+        console.log(`[Comment History] Found ${videoComments} comments by channel owner in video: ${video.snippet.title}`);
+        if (CONFIG.DEBUG_MODE) {
+          console.log(`[Comment History] Also showing ${debugComments} comments from other users for debugging`);
+        }
       }
     } catch (err) {
-      console.error(`Error fetching comments for video ${videoId}:`, err);
+      console.error(`[Comment History] Error fetching comments for video ${videoId}:`, err);
     }
   }
   
+  console.log(`[Comment History] Total comments found: ${comments.length}`);
   return comments;
 }
 
@@ -202,6 +292,12 @@ function createCommentHistoryTab() {
     e.preventDefault();
     e.stopPropagation();
     
+    // Toggle debug mode with Ctrl+Click
+    if (e.ctrlKey || e.metaKey) {
+      CONFIG.DEBUG_MODE = !CONFIG.DEBUG_MODE;
+      console.log(`[Comment History] Debug mode ${CONFIG.DEBUG_MODE ? 'ENABLED' : 'DISABLED'}`);
+    }
+    
     // Remove active state from other tabs
     const allTabs = tabsContainer.querySelectorAll('tp-yt-paper-tab');
     allTabs.forEach(tab => tab.setAttribute('aria-selected', 'false'));
@@ -213,6 +309,9 @@ function createCommentHistoryTab() {
     handleTabClick();
   });
   
+  // Add tooltip
+  commentHistoryTab.title = 'Click to view comment history. Ctrl+Click to toggle debug mode.';
+  
   // Insert after existing tabs
   tabsContainer.appendChild(commentHistoryTab);
 }
@@ -221,9 +320,19 @@ function createCommentHistoryTab() {
 async function handleTabClick() {
   const channelId = getChannelId();
   if (!channelId) {
-    alert('Could not determine channel ID');
+    showCommentSection(`
+      <div class="comment-history-container">
+        <h2>Error</h2>
+        <p>Could not determine channel ID. Please check the browser console for debugging information.</p>
+        <p style="font-size: 12px; color: var(--yt-spec-text-secondary);">
+          Open Developer Tools (F12) → Console tab to see detailed logs.
+        </p>
+      </div>
+    `);
     return;
   }
+  
+  console.log('[Comment History] Starting comment fetch for channel:', channelId);
   
   // Reset state for new channel
   allVideos = [];
@@ -237,6 +346,7 @@ async function handleTabClick() {
       <div class="loading-state">
         <h2>Loading Comment History...</h2>
         <p>Fetching recent comments from this channel's videos...</p>
+        <p style="font-size: 12px; color: var(--yt-spec-text-secondary);">Channel ID: ${channelId}</p>
       </div>
     </div>
   `);
@@ -245,18 +355,57 @@ async function handleTabClick() {
   const result = await fetchComments(channelId);
   
   if (result.success) {
-    displayComments(result.comments, result.hasMore);
+    if (result.comments.length === 0) {
+      // Show message when no comments found
+      showCommentSection(`
+        <div class="comment-history-container">
+          <h2>No Comments Found</h2>
+          <p>This channel owner hasn't made any comments on their recent ${currentVideoIndex} videos.</p>
+          <div class="error-details">
+            <p>Possible reasons:</p>
+            <ul>
+              <li>The channel owner doesn't comment on their own videos</li>
+              <li>Comments might be on older videos not checked yet</li>
+              <li>The channel might use a different account for commenting</li>
+            </ul>
+            ${result.hasMore ? '<p><strong>Try loading more videos to find comments.</strong></p>' : ''}
+          </div>
+          ${result.hasMore ? `
+            <div class="load-more-container">
+              <button id="load-more-comments" class="load-more-button">
+                Check More Videos
+              </button>
+            </div>
+          ` : ''}
+        </div>
+      `);
+      
+      // Add event listener if there's a load more button
+      if (result.hasMore) {
+        const loadMoreBtn = document.getElementById('load-more-comments');
+        if (loadMoreBtn) {
+          loadMoreBtn.addEventListener('click', loadMoreComments);
+        }
+      }
+    } else {
+      displayComments(result.comments, result.hasMore);
+    }
   } else {
     showCommentSection(`
       <div class="comment-history-container">
         <h2>Error Loading Comments</h2>
         <p>${result.message || result.error || 'Unable to fetch comments'}</p>
         <div class="error-details">
-          <p>Possible reasons:</p>
+          <p>Debugging info:</p>
           <ul>
-            <li>The API key may have exceeded its quota</li>
-            <li>The channel may have no recent videos</li>
-            <li>Comments may be disabled on their videos</li>
+            <li>Channel ID: ${channelId}</li>
+            <li>Check browser console for detailed error logs</li>
+          </ul>
+          <p>Common issues:</p>
+          <ul>
+            <li>API key exceeded quota (limit: 10,000 units/day)</li>
+            <li>Invalid API key or restrictions</li>
+            <li>Network connectivity issues</li>
           </ul>
         </div>
       </div>
@@ -306,20 +455,31 @@ function displayComments(comments, hasMore = false) {
     return;
   }
   
-  const commentsHtml = comments.map(comment => `
-    <div class="comment-item ${comment.isReply ? 'reply-comment' : ''}">
-      <div class="comment-header">
-        <span class="comment-date">${comment.date}</span>
-        <a href="${comment.videoUrl}" class="comment-video-link" target="_blank">
-          ${comment.isReply ? '↳ Reply on: ' : 'Comment on: '} ${comment.videoTitle}
-        </a>
+  const commentsHtml = comments.map(comment => {
+    const debugInfo = CONFIG.DEBUG_MODE ? `
+      <div class="debug-info">
+        <span>Author: ${comment.author}</span>
+        <span>Channel ID: ${comment.authorChannelId}</span>
+        <span>${comment.isChannelOwner ? '✓ Channel Owner' : '✗ Other User'}</span>
       </div>
-      <div class="comment-text">${comment.text}</div>
-      <div class="comment-stats">
-        <span class="comment-likes">👍 ${comment.likes || 0}</span>
+    ` : '';
+    
+    return `
+      <div class="comment-item ${comment.isReply ? 'reply-comment' : ''} ${!comment.isChannelOwner ? 'debug-comment' : ''}">
+        <div class="comment-header">
+          <span class="comment-date">${comment.date}</span>
+          <a href="${comment.videoUrl}" class="comment-video-link" target="_blank">
+            ${comment.isReply ? '↳ Reply on: ' : 'Comment on: '} ${comment.videoTitle}
+          </a>
+        </div>
+        ${debugInfo}
+        <div class="comment-text">${comment.text}</div>
+        <div class="comment-stats">
+          <span class="comment-likes">👍 ${comment.likes || 0}</span>
+        </div>
       </div>
-    </div>
-  `).join('');
+    `;
+  }).join('');
   
   const loadMoreButton = hasMore ? `
     <div class="load-more-container">
@@ -329,9 +489,16 @@ function displayComments(comments, hasMore = false) {
     </div>
   ` : '';
   
+  const debugNotice = CONFIG.DEBUG_MODE ? `
+    <div class="debug-notice">
+      ⚠️ Debug Mode: Showing comments from all users (not just channel owner)
+    </div>
+  ` : '';
+  
   showCommentSection(`
     <div class="comment-history-container">
       <h2>Comment History</h2>
+      ${debugNotice}
       <p class="comment-count">Showing ${comments.length} comments from ${currentVideoIndex} videos checked</p>
       <div class="comments-list">
         ${commentsHtml}
