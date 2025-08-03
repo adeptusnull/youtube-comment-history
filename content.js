@@ -11,9 +11,11 @@ let isLoading = false;
 // Function to extract channel ID from various YouTube pages
 function getChannelId() {
   console.log('[Comment History] Attempting to extract channel ID...');
+  console.log('[Comment History] Current URL:', window.location.href);
   
   // Method 1: Try from canonical link
   const channelLink = document.querySelector('link[rel="canonical"]');
+  console.log('[Comment History] Canonical link:', channelLink?.href);
   if (channelLink && channelLink.href.includes('/channel/')) {
     const channelId = channelLink.href.split('/channel/')[1].split('/')[0];
     console.log('[Comment History] Found channel ID from canonical:', channelId);
@@ -53,10 +55,15 @@ function getChannelId() {
   
   // Method 5: For @username URLs, try to get from page structure
   if (window.location.href.includes('/@')) {
+    console.log('[Comment History] Detected @username URL, trying various methods...');
+    
+    // Try ytInitialData
     const ytInitialData = window.ytInitialData;
+    console.log('[Comment History] ytInitialData exists:', !!ytInitialData);
+    
     if (ytInitialData?.header?.c4TabbedHeaderRenderer?.channelId) {
       const channelId = ytInitialData.header.c4TabbedHeaderRenderer.channelId;
-      console.log('[Comment History] Found channel ID from ytInitialData:', channelId);
+      console.log('[Comment History] Found channel ID from ytInitialData header:', channelId);
       return channelId;
     }
     
@@ -66,9 +73,35 @@ function getChannelId() {
       console.log('[Comment History] Found channel ID from metadata:', channelId);
       return channelId;
     }
+    
+    // Try to find in page data
+    if (ytInitialData?.contents?.twoColumnBrowseResultsRenderer?.tabs) {
+      try {
+        const channelId = ytInitialData.microformat?.microformatDataRenderer?.urlCanonical?.split('/channel/')[1];
+        if (channelId) {
+          console.log('[Comment History] Found channel ID from microformat:', channelId);
+          return channelId;
+        }
+      } catch (e) {
+        console.log('[Comment History] Failed to extract from microformat:', e);
+      }
+    }
+  }
+  
+  // Method 6: Try to extract from any script tag containing channelId
+  try {
+    const responseText = document.documentElement.innerHTML;
+    const channelIdMatch = responseText.match(/"channelId":"(UC[a-zA-Z0-9_-]+)"/);
+    if (channelIdMatch && channelIdMatch[1]) {
+      console.log('[Comment History] Found channel ID from page HTML:', channelIdMatch[1]);
+      return channelIdMatch[1];
+    }
+  } catch (e) {
+    console.error('[Comment History] Error searching page HTML:', e);
   }
   
   console.error('[Comment History] Could not find channel ID!');
+  console.error('[Comment History] Please check the browser console and report this issue with the channel URL');
   return null;
 }
 
@@ -235,6 +268,110 @@ async function fetchComments(channelId) {
   }
 }
 
+// Function to search all videos
+async function searchAllVideos(channelId) {
+  console.log('[Comment History] Starting search of ALL videos for channel:', channelId);
+  
+  // Show progress UI
+  showCommentSection(`
+    <div class="comment-history-container">
+      <div class="loading-state">
+        <h2>Searching All Videos...</h2>
+        <div id="search-progress">
+          <p>Fetching video list...</p>
+          <div class="progress-bar">
+            <div class="progress-fill" style="width: 0%"></div>
+          </div>
+          <p class="progress-text">0 videos checked</p>
+        </div>
+        <p style="font-size: 11px; color: var(--yt-spec-text-secondary); margin-top: 10px;">
+          This may take several minutes depending on the number of videos...
+        </p>
+      </div>
+    </div>
+  `);
+  
+  try {
+    let allVideosList = [];
+    let nextPageToken = '';
+    let pageCount = 0;
+    
+    // Fetch ALL videos with pagination
+    do {
+      const videoResult = await fetchChannelVideos(channelId, nextPageToken);
+      if (!videoResult.success) {
+        showCommentSection(`
+          <div class="comment-history-container">
+            <h2>Error</h2>
+            <p>${videoResult.message || 'Failed to fetch videos'}</p>
+          </div>
+        `);
+        return;
+      }
+      
+      allVideosList = [...allVideosList, ...videoResult.videos];
+      nextPageToken = videoResult.nextPageToken;
+      pageCount++;
+      
+      // Update progress
+      document.querySelector('#search-progress p').textContent = 
+        `Found ${allVideosList.length} videos (${pageCount} pages loaded)...`;
+      
+      // Limit to prevent infinite loops (1000 videos max)
+      if (allVideosList.length >= 1000) {
+        console.log('[Comment History] Reached 1000 video limit');
+        break;
+      }
+    } while (nextPageToken);
+    
+    console.log(`[Comment History] Found total of ${allVideosList.length} videos`);
+    
+    // Now fetch comments from ALL videos in batches
+    const allComments = [];
+    const batchSize = 10; // Process 10 videos at a time
+    
+    for (let i = 0; i < allVideosList.length; i += batchSize) {
+      const batch = allVideosList.slice(i, i + batchSize);
+      const batchComments = await fetchCommentsFromVideos(channelId, batch);
+      allComments.push(...batchComments);
+      
+      // Update progress
+      const progress = Math.round((i + batch.length) / allVideosList.length * 100);
+      document.querySelector('.progress-fill').style.width = progress + '%';
+      document.querySelector('.progress-text').textContent = 
+        `${i + batch.length} / ${allVideosList.length} videos checked (${allComments.length} comments found)`;
+    }
+    
+    // Sort comments by date
+    allComments.sort((a, b) => b.timestamp - a.timestamp);
+    loadedComments = allComments;
+    
+    console.log(`[Comment History] Search complete. Found ${allComments.length} total comments`);
+    
+    // Display results
+    if (allComments.length === 0) {
+      showCommentSection(`
+        <div class="comment-history-container">
+          <h2>Search Complete</h2>
+          <p>No comments found across ${allVideosList.length} videos.</p>
+          <p>This channel owner has not commented on any of their videos.</p>
+        </div>
+      `);
+    } else {
+      displayComments(allComments, false);
+    }
+    
+  } catch (error) {
+    console.error('[Comment History] Error during full search:', error);
+    showCommentSection(`
+      <div class="comment-history-container">
+        <h2>Error</h2>
+        <p>An error occurred while searching: ${error.message}</p>
+      </div>
+    `);
+  }
+}
+
 // Function to load more comments
 async function loadMoreComments() {
   if (isLoading) return;
@@ -322,11 +459,22 @@ async function handleTabClick() {
   if (!channelId) {
     showCommentSection(`
       <div class="comment-history-container">
-        <h2>Error</h2>
-        <p>Could not determine channel ID. Please check the browser console for debugging information.</p>
-        <p style="font-size: 12px; color: var(--yt-spec-text-secondary);">
-          Open Developer Tools (F12) → Console tab to see detailed logs.
-        </p>
+        <h2>Error: Channel ID Not Found</h2>
+        <p>Could not determine channel ID for this page.</p>
+        <div class="error-details">
+          <p><strong>Current URL:</strong> ${window.location.href}</p>
+          <p><strong>What to do:</strong></p>
+          <ul>
+            <li>Open Developer Tools (F12) → Console tab</li>
+            <li>Look for [Comment History] logs to see what was tried</li>
+            <li>Try refreshing the page and clicking the tab again</li>
+            <li>For @username URLs, YouTube's structure may have changed</li>
+          </ul>
+          <p style="margin-top: 10px;">
+            <strong>Temporary workaround:</strong> Navigate to the channel's "Videos" tab, 
+            then the URL should change to /channel/[ID] format which works better.
+          </p>
+        </div>
       </div>
     `);
     return;
@@ -347,9 +495,23 @@ async function handleTabClick() {
         <h2>Loading Comment History...</h2>
         <p>Fetching recent comments from this channel's videos...</p>
         <p style="font-size: 12px; color: var(--yt-spec-text-secondary);">Channel ID: ${channelId}</p>
+        <div style="margin-top: 20px;">
+          <button id="search-all-videos" class="search-all-button">Search All Videos</button>
+          <p style="font-size: 11px; margin-top: 8px; color: var(--yt-spec-text-secondary);">
+            ⚠️ Warning: This will use significant API quota
+          </p>
+        </div>
       </div>
     </div>
   `);
+  
+  // Add event listener for search all button
+  setTimeout(() => {
+    const searchAllBtn = document.getElementById('search-all-videos');
+    if (searchAllBtn) {
+      searchAllBtn.addEventListener('click', () => searchAllVideos(channelId));
+    }
+  }, 100);
   
   // Fetch comments
   const result = await fetchComments(channelId);
