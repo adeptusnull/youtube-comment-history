@@ -1,0 +1,6 @@
+# Ignore config file with API key
+config.js
+
+# Ignore any backup config files
+config.js.backup
+config.js.example
